@@ -1,0 +1,159 @@
+// ShelfProof — experiment bench for measuring which product-listing edits
+// change an AI shopping assistant's recommendation.
+//
+// Design notes:
+//  - Listings are stored fully materialised, per variant. The seed script does
+//    the transforms; the runner does no editing. This means the exact text the
+//    agent saw for any trial is recoverable from the DB forever, which is the
+//    whole point of a bench.
+//  - Controls (the 3 non-subject SKUs) are stored once per category and never
+//    varied. Only the subject has 6 rows in SubjectVariant.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Category {
+  id         String   @id
+  name       String
+  subjectSku String
+  specKeys   String[] // canonical spec-table key order for this category
+
+  listings ListingBase[]
+  variants SubjectVariant[]
+  intents  ShopperIntent[]
+  trials   Trial[]
+
+  @@map("categories")
+}
+
+/// The 4 competing SKUs as they exist at baseline. For the 3 controls this is
+/// the only version that ever exists; for the subject this is v0_control's
+/// source and is duplicated into SubjectVariant for symmetry.
+model ListingBase {
+  id          String  @id @default(cuid())
+  categoryId  String
+  sku         String  @unique
+  brand       String
+  title       String
+  price       Decimal @db.Decimal(10, 2)
+  currency    String  @default("GBP")
+  bullets     String[]
+  specs       Json // { [specKey]: string | null } — null means "field left empty"
+  rating      Float
+  reviewCount Int
+  reviews     String[]
+  isSubject   Boolean @default(false)
+
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@index([categoryId])
+  @@map("listing_base")
+}
+
+/// The subject listing as rendered under each of the 6 variants.
+/// Exactly one field-group differs from v0_control in each row.
+model SubjectVariant {
+  id          String  @id @default(cuid())
+  categoryId  String
+  variant     String // v0_control | v1_title | v2_claim_specificity | v3_price_position | v4_review_text | v5_spec_complete
+  sku         String
+  brand       String
+  title       String
+  price       Decimal @db.Decimal(10, 2)
+  currency    String  @default("GBP")
+  bullets     String[]
+  specs       Json
+  rating      Float
+  reviewCount Int
+  reviews     String[]
+
+  /// Which field-group this variant edits, for provenance in the UI.
+  changedFields String[]
+
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  trials   Trial[]
+
+  @@unique([categoryId, variant])
+  @@map("subject_variants")
+}
+
+model ShopperIntent {
+  id         String @id @default(cuid())
+  categoryId String
+  index      Int // 0 or 1
+  text       String
+
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  trials   Trial[]
+
+  @@unique([categoryId, index])
+  @@map("shopper_intents")
+}
+
+/// One execution of the full grid. Resume-on-crash keys off this.
+model Run {
+  id          String    @id @default(cuid())
+  model       String
+  temperature Float
+  startedAt   DateTime  @default(now())
+  finishedAt  DateTime?
+  note        String?
+
+  trials Trial[]
+
+  @@map("runs")
+}
+
+/// One LLM call. Every field the analysis or drill-down needs is here; nothing
+/// is recomputed from a cache.
+model Trial {
+  id         String @id @default(cuid())
+  runId      String
+  categoryId String
+  variantId  String
+  intentId   String
+
+  variant    String // denormalised for query convenience
+  trialIndex Int // 0..7 within (category, variant)
+  seed       Int // trialIndex; stored explicitly so the shuffle is reproducible
+
+  /// SKUs in the order they were presented to the agent. Position bias is the
+  /// biggest confound in this design, so this is not optional.
+  listingOrder    String[]
+  subjectPosition Int // 0-based index of the subject in listingOrder
+
+  chosenSku  String?
+  ranking    String[]
+  reason     String?
+  subjectWon Boolean?
+  subjectRank Int? // 1-based rank of the subject in `ranking`
+
+  valid        Boolean @default(false)
+  invalidCause String? // parse_failure | missing_sku | bad_ranking | api_error
+  rawResponse  String?
+  parseRetried Boolean @default(false)
+
+  latencyMs    Int
+  inputTokens  Int
+  outputTokens Int
+
+  createdAt DateTime @default(now())
+
+  run      Run            @relation(fields: [runId], references: [id], onDelete: Cascade)
+  category Category       @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  variantRef SubjectVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  intent   ShopperIntent  @relation(fields: [intentId], references: [id], onDelete: Cascade)
+
+  /// Resume-on-crash: the runner skips any cell that already exists.
+  @@unique([runId, categoryId, variant, trialIndex])
+  @@index([categoryId, variant])
+  @@index([runId])
+  @@map("trials")
+}
