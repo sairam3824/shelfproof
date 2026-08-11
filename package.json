@@ -1,0 +1,38 @@
+{
+  "name": "shelfproof",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "prisma generate && next build",
+    "start": "next start",
+    "lint": "next lint",
+    "db:push": "prisma db push",
+    "db:seed": "node --env-file=.env prisma/seed.ts",
+    "db:studio": "prisma studio",
+    "trials": "node --env-file=.env scripts/run-trials.ts",
+    "report": "node --env-file=.env scripts/report.ts",
+    "test": "node --test --env-file-if-exists=.env src/lib/*.test.ts"
+  },
+  "prisma": {
+    "seed": "node --env-file=.env prisma/seed.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.68.0",
+    "@prisma/client": "^6.19.0",
+    "next": "^15.5.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "recharts": "^2.15.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.13",
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "prisma": "^6.19.0",
+    "tailwindcss": "^4.1.13",
+    "typescript": "^5.9.0"
+  }
+}
