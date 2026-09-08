@@ -3,11 +3,15 @@
 //
 // Design notes:
 //  - Listings are stored fully materialised, per variant. The seed script does
-//    the transforms; the runner does no editing. This means the exact text the
-//    agent saw for any trial is recoverable from the DB forever, which is the
-//    whole point of a bench.
+//    the transforms; the runner does no editing.
 //  - Controls (the 3 non-subject SKUs) are stored once per category and never
 //    varied. Only the subject has 6 rows in SubjectVariant.
+//  - SubjectVariant rows are upserted by the seed script, so their text CAN
+//    change after a run. Every trial therefore stores `variantContentHash`, the
+//    hash of the listing as it was rendered for that trial. Comparing it to the
+//    variant row's current `contentHash` is what makes "the exact text the agent
+//    saw" a checkable claim rather than an assumption. The seed script also
+//    refuses to rewrite content that recorded trials depend on unless forced.
 
 generator client {
   provider = "prisma-client-js"
@@ -51,6 +55,9 @@ model ListingBase {
   reviews     String[]
   isSubject   Boolean @default(false)
 
+  /// sha256 (truncated) of the rendered listing content — see src/lib/content-hash.ts
+  contentHash String @default("")
+
   category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
 
   @@index([categoryId])
@@ -77,6 +84,10 @@ model SubjectVariant {
   /// Which field-group this variant edits, for provenance in the UI.
   changedFields String[]
 
+  /// sha256 (truncated) of the rendered listing content. Trials store the hash
+  /// they saw; a mismatch means this row was re-seeded after the run.
+  contentHash String @default("")
+
   category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   trials   Trial[]
 
@@ -101,10 +112,17 @@ model ShopperIntent {
 model Run {
   id          String    @id @default(cuid())
   model       String
-  temperature Float
+  /// null when the model does not accept a temperature parameter
+  temperature Float?
   startedAt   DateTime  @default(now())
   finishedAt  DateTime?
   note        String?
+
+  /// Recorded so --resume can refuse to continue a run under different
+  /// settings. Mixing two models under one Run row makes the results a blend
+  /// of two experiments reported as one.
+  trialsPerCell Int    @default(8)
+  orderMode     String @default("balanced")
 
   trials Trial[]
 
@@ -123,6 +141,12 @@ model Trial {
   variant    String // denormalised for query convenience
   trialIndex Int // 0..7 within (category, variant)
   seed       Int // trialIndex; stored explicitly so the shuffle is reproducible
+
+  /// Index of the shopper intent used, and the subject listing's content hash
+  /// at the moment this trial ran. The hash is the provenance anchor: compare
+  /// it to SubjectVariant.contentHash to detect a re-seed since the run.
+  intentIndex        Int    @default(0)
+  variantContentHash String @default("")
 
   /// SKUs in the order they were presented to the agent. Position bias is the
   /// biggest confound in this design, so this is not optional.
