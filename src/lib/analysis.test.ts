@@ -4,6 +4,8 @@ import {
   wilsonInterval,
   liftInterval,
   analyseVariants,
+  analysePositions,
+  poolAcrossCategories,
   editPriority,
   mean,
   stderr,
@@ -197,11 +199,89 @@ test("editPriority: separates measurable effects from the noise band", () => {
     ...rows("v2_claim_specificity", 2, 8), // noise
     ...rows("v3_price_position", 7, 8), // clear effect, smaller
   ]);
-  const { measurable, noEffect } = editPriority(stats);
+  const { helped, hurt, noEffect } = editPriority(stats);
   assert.deepEqual(
-    measurable.map((s) => s.variant),
+    helped.map((s) => s.variant),
     ["v1_title", "v3_price_position"],
   );
+  assert.equal(hurt.length, 0);
   assert.ok(noEffect.some((s) => s.variant === "v2_claim_specificity"));
-  assert.ok(!measurable.some((s) => s.variant === "v0_control"));
+  assert.ok(!helped.some((s) => s.variant === "v0_control"));
+});
+
+test("editPriority: a variant that measurably hurts is not listed as a priority edit", () => {
+  const stats = analyseVariants([
+    ...rows("v0_control", 8, 8),
+    ...rows("v1_title", 0, 8), // clearly worse than control
+  ]);
+  const { helped, hurt } = editPriority(stats);
+  // The old shape put this at the bottom of a numbered "do these edits" list.
+  assert.equal(helped.length, 0);
+  assert.deepEqual(
+    hurt.map((s) => s.variant),
+    ["v1_title"],
+  );
+  assert.ok(hurt[0].lift! < 0);
+});
+
+test("editPriority: 'not measured' is kept apart from 'measured, no effect'", () => {
+  // A run where every call failed must not present itself as a null result.
+  const allInvalid = ["v0_control", "v1_title", "v2_claim_specificity"].flatMap((variant) =>
+    Array.from({ length: 8 }, () => ({
+      variant,
+      valid: false,
+      subjectWon: null,
+      subjectRank: null,
+    })),
+  );
+  const { helped, hurt, noEffect, insufficient } = editPriority(analyseVariants(allInvalid));
+  assert.equal(helped.length, 0);
+  assert.equal(hurt.length, 0);
+  assert.equal(noEffect.length, 0, "nothing was measured, so nothing can be 'no effect'");
+  assert.ok(insufficient.some((s) => s.variant === "v1_title"));
+  assert.ok(insufficient.every((s) => s.verdict === "insufficient"));
+});
+
+test("analysePositions: reports win rate per slot over valid trials only", () => {
+  const at = (pos: number, won: boolean, valid = true): TrialRow => ({
+    variant: "v0_control",
+    valid,
+    subjectWon: valid ? won : null,
+    subjectRank: valid ? 1 : null,
+    subjectPosition: pos,
+  });
+  const stats = analysePositions([
+    at(0, true),
+    at(0, false),
+    at(1, true),
+    at(1, true),
+    at(2, false),
+    at(3, false),
+    at(3, true, false), // invalid — excluded from both numerator and denominator
+  ]);
+  assert.equal(stats.length, 4);
+  assert.deepEqual(
+    stats.map((s) => s.trials),
+    [2, 2, 1, 1],
+  );
+  close(stats[0].winRate!, 0.5);
+  close(stats[1].winRate!, 1.0);
+  assert.equal(stats[3].wins, 0);
+});
+
+test("poolAcrossCategories: sums cells and widens n without inventing wins", () => {
+  const a = analyseVariants([...rows("v0_control", 2, 8), ...rows("v1_title", 5, 8)]);
+  const b = analyseVariants([...rows("v0_control", 3, 8), ...rows("v1_title", 6, 8)]);
+  const pooled = poolAcrossCategories([a, b]);
+
+  const control = pooled.find((s) => s.variant === "v0_control")!;
+  const title = pooled.find((s) => s.variant === "v1_title")!;
+  assert.equal(control.validTrials, 16);
+  assert.equal(control.wins, 5);
+  assert.equal(title.validTrials, 16);
+  assert.equal(title.wins, 11);
+
+  // The whole point of pooling: the interval is narrower than either input.
+  const singleWidth = a.find((s) => s.variant === "v1_title")!.ci!;
+  assert.ok(title.ci!.hi - title.ci!.lo < singleWidth.hi - singleWidth.lo);
 });

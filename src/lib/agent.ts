@@ -33,12 +33,18 @@ function extractJson(text: string): unknown | null {
 function validate(
   parsed: unknown,
   validCodes: string[],
-): { ok: true; chosen: string; ranking: string[]; reason: string } | { ok: false; cause: "parse_failure" | "missing_sku" | "bad_ranking" } {
+):
+  | { ok: true; chosen: string; ranking: string[]; reason: string | null }
+  | { ok: false; cause: "parse_failure" | "missing_sku" | "bad_ranking" } {
   if (!parsed || typeof parsed !== "object") return { ok: false, cause: "parse_failure" };
   const o = parsed as Record<string, unknown>;
 
   const chosen = typeof o.chosen_sku === "string" ? o.chosen_sku.trim() : null;
-  const reason = typeof o.reason === "string" ? o.reason : "";
+  // An absent or blank reason does not invalidate the trial — the choice is the
+  // measurement and the reason is commentary — but it is recorded as null
+  // rather than "" so the drill-down can say so instead of rendering blank.
+  const rawReason = typeof o.reason === "string" ? o.reason.trim() : "";
+  const reason = rawReason.length > 0 ? rawReason : null;
   const ranking = Array.isArray(o.ranking)
     ? o.ranking.filter((r): r is string => typeof r === "string").map((r) => r.trim())
     : null;
@@ -58,7 +64,8 @@ function validate(
 
 export async function askAgent(opts: {
   model: string;
-  temperature: number;
+  /** null omits the parameter entirely, for models that reject it. */
+  temperature: number | null;
   maxTokens: number;
   userPrompt: string;
   validCodes: string[];
@@ -66,8 +73,13 @@ export async function askAgent(opts: {
   const started = Date.now();
   let inputTokens = 0;
   let outputTokens = 0;
-  let raw = "";
   let parseRetried = false;
+
+  // Every attempt is kept, not just the last. When a retry succeeds the record
+  // of what the first attempt got wrong is the only evidence of why the retry
+  // was needed, and overwriting it destroys that.
+  const transcript: string[] = [];
+  const record = () => transcript.join("\n\n").slice(0, 8000);
 
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: opts.userPrompt }];
 
@@ -78,7 +90,7 @@ export async function askAgent(opts: {
       const res = await client.messages.create({
         model: opts.model,
         max_tokens: opts.maxTokens,
-        temperature: opts.temperature,
+        ...(opts.temperature === null ? {} : { temperature: opts.temperature }),
         thinking: { type: "disabled" },
         system: SYSTEM_PROMPT,
         messages,
@@ -89,11 +101,14 @@ export async function askAgent(opts: {
         if (block.type === "text") text += block.text;
       }
     } catch (err) {
+      transcript.push(
+        `[attempt ${attempt + 1} api_error] ${err instanceof Error ? err.message : String(err)}`,
+      );
       return {
         chosenCode: null,
         ranking: [],
         reason: null,
-        raw: raw + `\n[api_error] ${err instanceof Error ? err.message : String(err)}`,
+        raw: record(),
         latencyMs: Date.now() - started,
         inputTokens,
         outputTokens,
@@ -102,7 +117,7 @@ export async function askAgent(opts: {
       };
     }
 
-    raw = text;
+    transcript.push(`[attempt ${attempt + 1}]\n${text}`);
     const result = validate(extractJson(text), opts.validCodes);
 
     if (result.ok) {
@@ -110,7 +125,7 @@ export async function askAgent(opts: {
         chosenCode: result.chosen,
         ranking: result.ranking,
         reason: result.reason,
-        raw,
+        raw: record(),
         latencyMs: Date.now() - started,
         inputTokens,
         outputTokens,
@@ -137,7 +152,7 @@ export async function askAgent(opts: {
       chosenCode: null,
       ranking: [],
       reason: null,
-      raw,
+      raw: record(),
       latencyMs: Date.now() - started,
       inputTokens,
       outputTokens,

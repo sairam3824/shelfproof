@@ -67,6 +67,8 @@ export type TrialRow = {
   valid: boolean;
   subjectWon: boolean | null;
   subjectRank: number | null;
+  /** 0-based slot the subject occupied; only needed by analysePositions. */
+  subjectPosition?: number | null;
 };
 
 export type VariantStats = {
@@ -160,20 +162,107 @@ export function analyseVariants(rows: TrialRow[]): VariantStats[] {
   });
 }
 
-/** Edit priority: measurable effects by lift descending, then the noise band. */
+/**
+ * Edit priority, in three groups.
+ *
+ * `helped` and `hurt` are kept apart deliberately. Both clear zero, so both are
+ * findings — but a numbered "do these edits" list that ends with the edit which
+ * measurably *reduces* the win rate is a list that will be misread. The sort
+ * inside each group is by effect size in the direction that matters.
+ */
 export function editPriority(stats: VariantStats[]): {
-  measurable: VariantStats[];
+  helped: VariantStats[];
+  hurt: VariantStats[];
   noEffect: VariantStats[];
+  insufficient: VariantStats[];
 } {
   const candidates = stats.filter((s) => s.variant !== "v0_control");
   return {
-    measurable: candidates
-      .filter((s) => s.verdict === "higher" || s.verdict === "lower")
+    helped: candidates
+      .filter((s) => s.verdict === "higher")
       .sort((a, b) => (b.lift ?? 0) - (a.lift ?? 0)),
+    hurt: candidates
+      .filter((s) => s.verdict === "lower")
+      .sort((a, b) => (a.lift ?? 0) - (b.lift ?? 0)),
+    // "We measured it and found nothing" and "we have no measurement" are
+    // different claims. Collapsing them lets a failed run present itself as a
+    // null result, which is the exact misreading this bench exists to prevent.
     noEffect: candidates
-      .filter((s) => s.verdict === "no_effect" || s.verdict === "insufficient")
+      .filter((s) => s.verdict === "no_effect")
       .sort((a, b) => (b.lift ?? 0) - (a.lift ?? 0)),
+    insufficient: candidates.filter((s) => s.verdict === "insufficient"),
   };
+}
+
+export type PositionStats = {
+  position: number; // 1-based, as presented to a reader
+  trials: number;
+  wins: number;
+  winRate: number | null;
+  ci: Interval | null;
+};
+
+/**
+ * Win rate by the slot the subject occupied.
+ *
+ * This is the audit of the randomisation itself, not a result about listings.
+ * The design claims position bias is removed by construction; the only way to
+ * check that claim is to look. Overlapping intervals across all four slots is
+ * the outcome the design predicts.
+ */
+export function analysePositions(rows: TrialRow[], slots = 4): PositionStats[] {
+  return Array.from({ length: slots }, (_, i) => {
+    const at = rows.filter((r) => r.valid && r.subjectPosition === i);
+    const wins = at.filter((r) => r.subjectWon).length;
+    return {
+      position: i + 1,
+      trials: at.length,
+      wins,
+      winRate: at.length ? wins / at.length : null,
+      ci: at.length ? wilsonInterval(wins, at.length) : null,
+    };
+  });
+}
+
+/**
+ * Pool one variant's trials across every category.
+ *
+ * Each category has its own subject and its own control win rate, so a pooled
+ * win rate is not "the" win rate of anything — it is the rate at which the
+ * subject-of-its-category gets picked, averaged over five different contests.
+ * What pooling buys is n: a 5x8 = 40-trial cell has an interval roughly half
+ * the width of an 8-trial one, which is the difference between detecting a
+ * 15-point effect and not. Read the lift, not the level.
+ */
+export function poolAcrossCategories(perCategory: VariantStats[][]): VariantStats[] {
+  const merged: TrialRow[] = [];
+  for (const stats of perCategory) {
+    for (const s of stats) {
+      for (let i = 0; i < s.wins; i++) {
+        merged.push({ variant: s.variant, valid: true, subjectWon: true, subjectRank: 1 });
+      }
+      for (let i = 0; i < s.validTrials - s.wins; i++) {
+        merged.push({ variant: s.variant, valid: true, subjectWon: false, subjectRank: null });
+      }
+      for (let i = 0; i < s.invalidTrials; i++) {
+        merged.push({ variant: s.variant, valid: false, subjectWon: null, subjectRank: null });
+      }
+    }
+  }
+  const pooled = analyseVariants(merged);
+  // Mean rank cannot be reconstructed from counts, so recompute it as the
+  // trial-weighted mean of the per-category means rather than inventing one.
+  return pooled.map((p) => {
+    const parts = perCategory
+      .flatMap((stats) => stats.filter((s) => s.variant === p.variant))
+      .filter((s) => s.meanRank !== null && s.validTrials > 0);
+    const n = parts.reduce((a, s) => a + s.validTrials, 0);
+    return {
+      ...p,
+      meanRank: n ? parts.reduce((a, s) => a + s.meanRank! * s.validTrials, 0) / n : null,
+      meanRankStderr: null,
+    };
+  });
 }
 
 export function fmtPct(x: number | null, dp = 0): string {

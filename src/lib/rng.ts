@@ -32,18 +32,39 @@ export function shuffle<T>(items: T[], rng: () => number): T[] {
   return out;
 }
 
+/** Which shopper intent trial `trialIndex` uses. Intents cycle. */
+export function intentIndexFor(trialIndex: number, intentCount: number): number {
+  return trialIndex % intentCount;
+}
+
+/**
+ * Cell sizes for which `balanced` mode is actually balanced.
+ *
+ * The subject must occupy each of the 4 slots equally often *within each
+ * intent*, so a cell needs a whole number of (intent x position) blocks:
+ * trialsPerCell must be divisible by 4 * intentCount.
+ */
+export function isBalanceable(trialsPerCell: number, intentCount: number): boolean {
+  return trialsPerCell > 0 && trialsPerCell % (4 * intentCount) === 0;
+}
+
 /**
  * Decide where each listing sits for one trial.
  *
- * Two properties matter here, and pure randomisation only gives the first:
+ * Three properties matter here, and pure randomisation gives only the first:
  *
- *  1. The subject must not sit in a fixed slot. With `balanced`, the subject
- *     occupies each of the 4 positions exactly twice across the 8 trials, which
- *     removes position bias by construction rather than in expectation. At
- *     n=8 a fair coin can easily deal the subject position 0 five times, and
- *     that noise lands directly on the win rate we are trying to measure.
+ *  1. The subject must not sit in a fixed slot.
  *
- *  2. The order must be IDENTICAL across the 6 variants at the same trial
+ *  2. Position must be balanced *within each intent*, not merely across the
+ *     cell. Balancing on `trialIndex % 4` while intents cycle on
+ *     `trialIndex % 2` looks balanced in aggregate but confounds the two: with
+ *     2 intents, intent 0 only ever sees the subject in slots 0 and 2, and
+ *     intent 1 only in slots 1 and 3. Any per-intent read of the results is
+ *     then measuring intent and position together. Indexing position by the
+ *     trial's ordinal *within its own intent* removes that: with 8 trials and
+ *     2 intents, each intent sees each of the 4 slots exactly once.
+ *
+ *  3. The order must be IDENTICAL across the 6 variants at the same trial
  *     index. Lift is a difference between a variant and control, so if both
  *     saw the same arrangement, position cancels out of the difference. This is
  *     why the seed deliberately excludes `variant`.
@@ -57,6 +78,7 @@ export function listingOrderFor(
   subjectSku: string,
   controlSkus: string[],
   mode: "balanced" | "pure" = "balanced",
+  intentCount = 1,
 ): string[] {
   const rng = makeRng(hashSeed(`${categoryId}:${trialIndex}`));
 
@@ -64,7 +86,10 @@ export function listingOrderFor(
     return shuffle([subjectSku, ...controlSkus], rng);
   }
 
-  const subjectPosition = trialIndex % 4;
+  // Ordinal of this trial within the subset that shares its intent.
+  const ordinalWithinIntent = Math.floor(trialIndex / Math.max(1, intentCount));
+  const subjectPosition = ordinalWithinIntent % 4;
+
   const controls = shuffle(controlSkus, rng);
   const order: string[] = [];
   let c = 0;
