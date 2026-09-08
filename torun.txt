@@ -1,0 +1,446 @@
+===============================================================================
+ ShelfProof - HOW TO RUN
+===============================================================================
+
+Plain-text runbook. Every command is copy-pasteable from the project root
+(the directory containing package.json).
+
+Contents
+  0. What this is
+  1. Prerequisites
+  2. Database - option A: local PostgreSQL (what this machine uses)
+  3. Database - option B: Neon / any hosted Postgres
+  4. Environment variables
+  5. First-time setup (the short version)
+  6. Running the experiment
+  7. Runner flags
+  8. Viewing results
+  9. Development commands
+ 10. Troubleshooting
+ 11. Current state of THIS checkout
+ 12. Starting over / cleaning up
+
+
+===============================================================================
+ 0. WHAT THIS IS
+===============================================================================
+
+Two separate things share this repo:
+
+  THE RUNNER   A Node script that makes LLM calls and writes trial rows to
+               Postgres. This is what costs money.
+
+  THE WEB APP  A Next.js dashboard that READS those rows. It never calls the
+               LLM. You can run it with an empty database - it will tell you
+               what to do next.
+
+So: the web app is safe to run any time. The runner spends money.
+
+
+===============================================================================
+ 1. PREREQUISITES
+===============================================================================
+
+  Node.js >= 22.18       REQUIRED. All scripts run TypeScript directly through
+                         Node's native type stripping, which is only unflagged
+                         from 22.18. On Node 20 or 22.17 you get a confusing
+                         syntax error.
+
+                         Check:  node -v
+
+  PostgreSQL 14+         Local or hosted. See sections 2 and 3.
+
+  Anthropic API key      Only needed for the runner, not the dashboard.
+                         Get one at https://console.anthropic.com/
+
+Install JS dependencies once:
+
+  npm install
+
+
+===============================================================================
+ 2. DATABASE - OPTION A: LOCAL POSTGRESQL  (what this machine uses)
+===============================================================================
+
+--- Install (macOS, Homebrew) -------------------------------------------------
+
+  brew install postgresql@16
+
+Homebrew creates a database cluster automatically at
+/opt/homebrew/var/postgresql@16 during install.
+
+--- Start the server ----------------------------------------------------------
+
+  /opt/homebrew/opt/postgresql@16/bin/pg_ctl \
+    -D /opt/homebrew/var/postgresql@16 \
+    -l /opt/homebrew/var/log/postgresql@16.log \
+    start
+
+This does NOT register a start-at-login service, so you must re-run it after a
+reboot. If you would rather it start automatically every time you log in:
+
+  brew services start postgresql@16
+
+--- Stop the server -----------------------------------------------------------
+
+  /opt/homebrew/opt/postgresql@16/bin/pg_ctl \
+    -D /opt/homebrew/var/postgresql@16 stop
+
+--- Create the database -------------------------------------------------------
+
+  /opt/homebrew/opt/postgresql@16/bin/createdb shelfproof
+
+--- Check it is up ------------------------------------------------------------
+
+  /opt/homebrew/opt/postgresql@16/bin/pg_isready
+  # expect: /tmp:5432 - accepting connections
+
+--- Connection string ---------------------------------------------------------
+
+Homebrew's Postgres uses your macOS username as the superuser and no password:
+
+  postgresql://YOUR_MAC_USERNAME@localhost:5432/shelfproof
+
+On this machine that is:
+
+  postgresql://sairammaruri@localhost:5432/shelfproof
+
+--- Convenience: put psql on your PATH ----------------------------------------
+
+Homebrew keeps postgresql@16 "keg-only", so psql is not on PATH by default.
+Either use the full path as above, or add this to ~/.zshrc:
+
+  export PATH="/opt/homebrew/opt/postgresql@16/bin:$PATH"
+
+
+===============================================================================
+ 3. DATABASE - OPTION B: NEON / ANY HOSTED POSTGRES
+===============================================================================
+
+Create a Postgres database and copy two connection strings into .env:
+
+  DATABASE_URL   the POOLED connection - used by the web app
+  DIRECT_URL     the DIRECT connection - used by `prisma db push`
+
+On Neon these are two different URLs shown in the dashboard. On a plain
+Postgres server they are simply the same URL twice.
+
+Nothing else changes; every command below works identically.
+
+
+===============================================================================
+ 4. ENVIRONMENT VARIABLES
+===============================================================================
+
+Copy the template and fill it in:
+
+  cp .env.example .env
+
+.env keys:
+
+  DATABASE_URL            Postgres pooled connection.       REQUIRED
+  DIRECT_URL              Postgres direct connection.       REQUIRED
+  ANTHROPIC_API_KEY       Only the runner needs this.       Runner only
+  SHELFPROOF_MODEL        Default "claude-sonnet-4-6".      Optional
+  SHELFPROOF_TEMPERATURE  Default "0.7".                    Optional
+
+.env is gitignored. Do not commit it, and do not create backups of it inside
+the repo - a file like .env.bak is NOT covered by .gitignore and would commit
+your credentials. Back it up outside the project directory.
+
+--- About the model choice ----------------------------------------------------
+
+The default is claude-sonnet-4-6, and this is deliberate rather than dated.
+
+The design needs stochastic sampling: 8 trials in a cell are only independent
+draws if the model can vary its answer, which requires a temperature parameter.
+The Claude 5 generation removed it - Opus 5 rejects temperature outright with a
+400, and Sonnet 5 rejects any non-default value. Sonnet 4.6 still accepts it.
+
+The runner checks this at startup and refuses to run a model that would reject
+the parameter, so you get one clear error instead of 240 failed calls.
+
+To use a different model, add it to BOTH tables in src/lib/cost.ts:
+  PRICING               so cost is reported instead of "n/a"
+  SUPPORTS_TEMPERATURE  so the runner knows it accepts the parameter
+
+
+===============================================================================
+ 5. FIRST-TIME SETUP (THE SHORT VERSION)
+===============================================================================
+
+Assuming Postgres is running and .env is filled in:
+
+  npm install
+  npm run db:push     # create the tables
+  npm run db:seed     # load 5 categories, 20 listings, 30 variants, 10 intents
+  npm run dev         # dashboard at http://localhost:3000
+
+At this point the dashboard works but says "No trials recorded yet" - that is
+correct, because no experiment has been run. Continue to section 6.
+
+
+===============================================================================
+ 6. RUNNING THE EXPERIMENT
+===============================================================================
+
+--- Step 1: dry run first (FREE) ----------------------------------------------
+
+Builds all 240 prompts and prints the grid without calling the API. Use it to
+confirm the seed data and wiring are sound before spending anything.
+
+  npm run trials -- --dry-run
+
+--- Step 2: the real run (COSTS MONEY) ----------------------------------------
+
+  npm run trials
+
+  What it does:  5 categories x 6 variants x 8 trials = 240 LLM calls
+  Roughly:       ~280k input tokens, ~36k output tokens
+  Cost:          ~$1.40 on claude-sonnet-4-6 at $3/$15 per million
+  Time:          ~5-10 minutes at the default concurrency of 4
+
+Cheaper first pass - one category only, 48 trials, roughly $0.28:
+
+  npm run trials -- --categories instant-coffee
+
+Valid category ids:
+  instant-coffee   green-tea   hand-wash   biscuits   shampoo
+
+--- Step 3: read the results --------------------------------------------------
+
+  npm run report      # markdown summary, ready to paste into the README
+  npm run dev         # dashboard at http://localhost:3000
+
+--- If the run is interrupted -------------------------------------------------
+
+Every trial is written the moment it returns, so nothing is lost. Resume:
+
+  npm run trials -- --resume-latest
+
+It skips cells already recorded and does not re-bill them.
+
+--- If some trials failed with an API error -----------------------------------
+
+Rate limits, dropped connections and auth failures are recorded as `api_error`.
+These are infrastructure failures, not measurements, so they are re-runnable:
+
+  npm run trials -- --repair
+
+This re-runs ONLY the api_error cells, including in an already-finished run,
+and overwrites them in place. Parse and ranking failures are deliberately NOT
+re-run - those are the model's real behaviour and the design counts them as
+data.
+
+
+===============================================================================
+ 7. RUNNER FLAGS
+===============================================================================
+
+  --dry-run             Build every prompt and print the grid, call nothing.
+  --resume-latest       Continue the most recent unfinished run.
+  --resume <runId>      Continue a specific run.
+  --repair              Re-run only the cells that failed with an API error.
+  --categories a,b      Restrict to some categories (comma separated).
+  --trials <n>          Trials per cell. Default 8. Must be a multiple of 8
+                        in balanced mode (see note below).
+  --order pure          Unconstrained randomisation instead of balanced.
+  --concurrency <n>     Parallel API calls. Default 4.
+  --model <id>          Override SHELFPROOF_MODEL.
+  --temperature <n>     Override SHELFPROOF_TEMPERATURE.
+  --allow-unpriced      Permit a model with no price table (cost reports n/a).
+
+Pass flags after `--`, e.g.:
+
+  npm run trials -- --categories green-tea --concurrency 8
+
+--- Why --trials must be a multiple of 8 --------------------------------------
+
+Balanced mode places the subject in each of the 4 slots equally often WITHIN
+each of the 2 shopper intents, so a cell needs a whole number of
+(intent x slot) blocks: 4 x 2 = 8. Use 8, 16, 32, 64.
+
+Any other value is refused rather than silently producing a skewed design.
+`--order pure` removes the constraint by using unconstrained randomisation.
+
+--- Runs are immutable in their settings --------------------------------------
+
+Resume refuses to continue a run under a different model, temperature, cell
+size or order mode. Every trial in a run must share those four, or the run's
+own metadata describes only some of its trials. Start a new run instead.
+
+
+===============================================================================
+ 8. VIEWING RESULTS
+===============================================================================
+
+  npm run dev         then open http://localhost:3000
+
+Three views, with one run selector in the header scoping all of them:
+
+  /              Category detail. Hero figure, lift-vs-control chart, win rate
+                 chart, full table, edit priority, randomisation audit, and a
+                 per-trial drill-down showing the agent's actual reasoning.
+
+  /overview      Cross-category rollup. Pooled lift per edit across all five
+                 categories (where the design has the most statistical power),
+                 plus a variant x category matrix.
+
+  /methodology   Trial counts, randomisation, CI method, provenance, and an
+                 explicit list of what the design cannot tell you.
+
+Command-line summary instead:
+
+  npm run report
+
+Inspect the raw rows directly:
+
+  npm run db:studio                    # Prisma Studio, opens a browser UI
+  psql -d shelfproof -c "select variant, count(*) from trials group by 1;"
+
+
+===============================================================================
+ 9. DEVELOPMENT COMMANDS
+===============================================================================
+
+  npm run dev          Next.js dev server on :3000
+  npm run build        Production build (runs prisma generate first)
+  npm run start        Serve the production build
+  npm run check        typecheck + lint + unit tests  <-- run before committing
+  npm run typecheck    tsc --noEmit
+  npm run lint         eslint
+  npm test             Unit tests (Wilson/Newcombe maths, randomisation
+                       invariants, verdict grouping)
+  npm run db:push      Sync the Prisma schema to the database
+  npm run db:seed      Seed listings, variants and intents (idempotent)
+  npm run db:studio    Browse the database in a UI
+
+--- Re-seeding after editing listing text -------------------------------------
+
+Seeding is an upsert, so it can rewrite rows that existing trials point at.
+The seed script refuses to do that when recorded trials depend on the changed
+content:
+
+  npm run db:seed              # refuses, explains which variants conflict
+  npm run db:seed -- --force   # rewrites anyway; old trials become "stale"
+
+Every trial stores a content hash of the listing it actually saw, so stale
+trials are flagged in the dashboard rather than silently mis-described. The
+clean path after a content edit is to start a NEW run, not to force a re-seed.
+
+
+===============================================================================
+ 10. TROUBLESHOOTING
+===============================================================================
+
+--- "Can't reach the database" on every page ----------------------------------
+
+Postgres is not running, or DATABASE_URL is wrong. Check:
+
+  /opt/homebrew/opt/postgresql@16/bin/pg_isready
+
+If it says "no response", start the server (section 2). The dashboard prints
+the underlying connection error at the bottom of that page.
+
+--- "No seed data yet" --------------------------------------------------------
+
+  npm run db:seed
+
+--- "No trials recorded yet" --------------------------------------------------
+
+Expected before the first run. See section 6.
+
+--- Every trial fails, tokens show 0, 401 authentication_error -----------------
+
+Your ANTHROPIC_API_KEY is invalid or expired. Fix it in .env, then:
+
+  npm run trials -- --repair
+
+To confirm the cause, read the stored error:
+
+  psql -d shelfproof -c \
+    "select \"rawResponse\" from trials where \"invalidCause\"='api_error' limit 1;"
+
+--- "does not accept a temperature parameter" ---------------------------------
+
+You selected a model that removed sampling parameters (any Claude 5 model).
+Use claude-sonnet-4-6, claude-opus-4-6 or claude-haiku-4-5. See section 4.
+
+--- "cannot be balanced for <category>" ---------------------------------------
+
+--trials must be a multiple of 8. See section 7.
+
+--- "Cannot continue run ... under different settings" ------------------------
+
+You are resuming with a different model/temperature/cell size/order than the
+run was started with. Either match the original flags or start a new run.
+
+--- SyntaxError / "Unexpected token" running any npm script -------------------
+
+Node is older than 22.18. Check `node -v` and upgrade.
+
+--- Port 3000 already in use --------------------------------------------------
+
+  lsof -ti:3000 | xargs kill
+  # or run on another port:
+  npx next dev -p 3001
+
+--- Prisma client out of date after a schema change ---------------------------
+
+  npx prisma generate
+  # or just: npm run db:push   (which generates as part of its work)
+
+--- Stale Next.js types after deleting a route --------------------------------
+
+  rm -rf .next && npm run build
+
+
+===============================================================================
+ 11. CURRENT STATE OF THIS CHECKOUT
+===============================================================================
+
+Set up and verified on 2026-08-16:
+
+  PostgreSQL 16.15 installed via Homebrew and running
+  Database `shelfproof` created
+  Schema pushed, seed loaded:
+      5 categories, 20 listings, 30 subject variants, 10 shopper intents
+  .env points at postgresql://sairammaruri@localhost:5432/shelfproof
+  Web app verified running on :3000, all three routes returning 200
+  npm run check green: typecheck clean, lint clean, 36/36 unit tests passing
+
+  ONE RUN EXISTS AND IT FAILED.
+      48 trials for instant-coffee, all recorded as api_error.
+      Cause: 401 authentication_error - "API key is invalid."
+
+  TO FINISH:
+      1. Put a valid key in ANTHROPIC_API_KEY in .env
+      2. npm run trials -- --repair --categories instant-coffee
+      3. Optionally run the remaining categories: npm run trials
+
+  The 48 failed rows are repairable by design - they are not counted as done
+  and --repair overwrites them in place without creating duplicates.
+
+
+===============================================================================
+ 12. STARTING OVER / CLEANING UP
+===============================================================================
+
+--- Delete all runs and trials, keep the seed data ----------------------------
+
+  psql -d shelfproof -c "truncate trials, runs cascade;"
+
+--- Wipe the whole database and rebuild ---------------------------------------
+
+  /opt/homebrew/opt/postgresql@16/bin/dropdb shelfproof
+  /opt/homebrew/opt/postgresql@16/bin/createdb shelfproof
+  npm run db:push
+  npm run db:seed
+
+--- Remove PostgreSQL entirely ------------------------------------------------
+
+  /opt/homebrew/opt/postgresql@16/bin/pg_ctl -D /opt/homebrew/var/postgresql@16 stop
+  brew uninstall postgresql@16
+  rm -rf /opt/homebrew/var/postgresql@16      # deletes all local data
+
+===============================================================================
