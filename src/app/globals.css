@@ -2,10 +2,17 @@
 
 /* Chart + page tokens. Defined as roles so light/dark swap in one place and the
    components are written against roles rather than raw hex. Values are the
-   validated reference palette (see dataviz skill). */
+   validated reference palette (see dataviz skill).
+
+   Dark values are declared under BOTH scopes: the media query covers the OS
+   setting, the [data-theme] scope covers an explicit toggle, and the :not()
+   guard lets a light stamp beat OS-dark. */
 :root {
   color-scheme: light;
+
+  /* surfaces & ink */
   --surface-1: #fcfcfb;
+  --surface-2: #f4f3ef;
   --page-plane: #f9f9f7;
   --text-primary: #0b0b0b;
   --text-secondary: #52514e;
@@ -13,15 +20,36 @@
   --gridline: #e1e0d9;
   --baseline: #c3c2b7;
   --hairline: rgba(11, 11, 11, 0.1);
+  --hairline-strong: rgba(11, 11, 11, 0.18);
+
+  /* categorical slot 1 — the only series hue this app needs */
   --series-1: #2a78d6;
+  --series-1-wash: rgba(42, 120, 214, 0.1);
+
+  /* diverging poles for lift (above/below control). Deliberately the
+     categorical red, not the critical status red, so a measurement direction
+     never impersonates a system state. */
+  --diverge-pos: #2a78d6;
+  --diverge-neg: #e34948;
+  --diverge-mid: #f0efec;
+  /* Neutral fill for "interval spans zero". Not --baseline: that is a gridline
+     token and sits at 1.75:1 on the light surface, below the 3:1 a data mark
+     needs. This step clears 3:1 on both surfaces. */
+  --mark-null: #898781;
+
+  /* status — reserved, always shipped with an icon + label */
   --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
   --critical: #d03b3b;
+  --success-text: #006300;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
     --surface-1: #1a1a19;
+    --surface-2: #232322;
     --page-plane: #0d0d0d;
     --text-primary: #ffffff;
     --text-secondary: #c3c2b7;
@@ -29,15 +57,25 @@
     --gridline: #2c2c2a;
     --baseline: #383835;
     --hairline: rgba(255, 255, 255, 0.1);
+    --hairline-strong: rgba(255, 255, 255, 0.2);
     --series-1: #3987e5;
+    --series-1-wash: rgba(57, 135, 229, 0.16);
+    --diverge-pos: #3987e5;
+    --diverge-neg: #e66767;
+    --diverge-mid: #383835;
+    --mark-null: #898781;
     --good: #0ca30c;
+    --warning: #fab219;
+    --serious: #ec835a;
     --critical: #d03b3b;
+    --success-text: #0ca30c;
   }
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
   --surface-1: #1a1a19;
+  --surface-2: #232322;
   --page-plane: #0d0d0d;
   --text-primary: #ffffff;
   --text-secondary: #c3c2b7;
@@ -45,20 +83,41 @@
   --gridline: #2c2c2a;
   --baseline: #383835;
   --hairline: rgba(255, 255, 255, 0.1);
+  --hairline-strong: rgba(255, 255, 255, 0.2);
   --series-1: #3987e5;
+  --series-1-wash: rgba(57, 135, 229, 0.16);
+  --diverge-pos: #3987e5;
+  --diverge-neg: #e66767;
+  --diverge-mid: #383835;
+  --mark-null: #898781;
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+  --success-text: #0ca30c;
 }
 
 body {
   background: var(--page-plane);
   color: var(--text-primary);
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
+
+/* ---------------------------------------------------------------- surfaces */
 
 .card {
   background: var(--surface-1);
   border: 1px solid var(--hairline);
-  border-radius: 10px;
+  border-radius: 12px;
 }
+
+.inset {
+  background: var(--surface-2);
+  border-radius: 8px;
+}
+
+/* ---------------------------------------------------------------- ink */
 
 .muted {
   color: var(--text-muted);
@@ -68,4 +127,139 @@ body {
 }
 .tnum {
   font-variant-numeric: tabular-nums;
+}
+
+/* Hero and stat-tile values keep proportional figures — tabular-nums makes a
+   number like 121 look loose at display sizes. */
+.figure {
+  font-variant-numeric: proportional-nums;
+  letter-spacing: -0.02em;
+}
+
+/* ---------------------------------------------------------------- controls */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  padding: 0.35rem 0.8rem;
+  font-size: 0.8125rem;
+  line-height: 1.2;
+  color: var(--text-secondary);
+  background: var(--surface-1);
+  transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+.pill:hover {
+  border-color: var(--hairline-strong);
+  color: var(--text-primary);
+}
+.pill[data-active="true"] {
+  border-color: var(--series-1);
+  color: var(--series-1);
+  background: var(--series-1-wash);
+}
+
+.tab {
+  position: relative;
+  padding: 0.5rem 0.15rem;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  border-bottom: 2px solid transparent;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+.tab:hover {
+  color: var(--text-primary);
+}
+.tab[data-active="true"] {
+  color: var(--text-primary);
+  border-bottom-color: var(--series-1);
+}
+
+/* Keyboard focus must be visible on every interactive element — the charts are
+   clickable, so this is a real navigation path, not decoration. */
+a:focus-visible,
+button:focus-visible,
+select:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--series-1);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ---------------------------------------------------------------- badges */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1.2;
+  padding: 0.2rem 0.5rem;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- table */
+
+.grid-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+.grid-table thead th {
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-align: left;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--hairline);
+  white-space: nowrap;
+}
+.grid-table tbody td {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--hairline);
+  vertical-align: top;
+}
+.grid-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.grid-table tbody tr[data-highlight="true"] {
+  background: var(--series-1-wash);
+}
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Wide content scrolls inside its own container — the page body never scrolls
+   horizontally. */
+.scroll-x {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ---------------------------------------------------------------- misc */
+
+.rule {
+  border: 0;
+  border-top: 1px solid var(--hairline);
+}
+
+.link {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: var(--baseline);
+  transition: text-decoration-color 0.12s ease;
+}
+.link:hover {
+  text-decoration-color: currentColor;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }
